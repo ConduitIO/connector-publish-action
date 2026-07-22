@@ -1,0 +1,71 @@
+name: 'composite-vs-reusable identity canary'
+
+# This is the permanent regression test against ever shipping this Action
+# as a `workflow_call` reusable workflow (README.md "Why composite, not
+# reusable" / step4-publishing-action.md §5's "reusable-workflow
+# misconfiguration" row): it asserts that a normal job's resolved SAN
+# (job_workflow_ref) stays THIS CALLER'S own workflow path — the shape a
+# composite action's steps inherit, since composite steps never introduce
+# a `uses: .../workflow.yml@ref` job boundary — while a job defined via
+# `uses: .../workflow.yml@ref` (a genuine reusable-workflow call) resolves
+# to the CALLED workflow's own path instead.
+#
+# HONEST SCOPE NOTE: this demonstrates the underlying job_workflow_ref
+# mechanism within a single repository (this one), which is the root cause
+# the whole composite-vs-reusable design decision rests on and is
+# independent of which repo either job lives in. It does not (yet) run a
+# true cross-repository canary (two disposable connector-repo-shaped
+# fixtures each `uses:`-ing this Action) — that is flagged as a follow-up
+# in the PR description, not silently substituted for.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # Represents how a composite action's steps resolve identity: they run
+  # INSIDE this job, so this job's own workflow_ref is what a caller's
+  # cosign signature would use — never `_reusable-echo-identity.yml`'s.
+  as_composite_caller:
+    runs-on: ubuntu-latest
+    outputs:
+      resolved-identity: ${{ steps.echo.outputs.resolved-identity }}
+    steps:
+      - name: Echo this job's own workflow_ref-derived SAN
+        id: echo
+        run: echo "resolved-identity=https://github.com/${{ github.workflow_ref }}" >> "$GITHUB_OUTPUT"
+
+  # A genuine reusable-workflow call: per GitHub's OIDC job_workflow_ref
+  # claim semantics, THIS job's resolved identity is
+  # _reusable-echo-identity.yml's own path, not canary.yml's.
+  as_reusable_workflow_call:
+    uses: ./.github/workflows/_reusable-echo-identity.yml
+
+  assert_identities_differ:
+    needs: [as_composite_caller, as_reusable_workflow_call]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Assert the two resolved identities differ and each names the right workflow file
+        env:
+          COMPOSITE_IDENTITY: ${{ needs.as_composite_caller.outputs.resolved-identity }}
+          REUSABLE_IDENTITY: ${{ needs.as_reusable_workflow_call.outputs.resolved-identity }}
+        run: |
+          set -euo pipefail
+          echo "composite-caller identity: $COMPOSITE_IDENTITY"
+          echo "reusable-workflow-call identity: $REUSABLE_IDENTITY"
+
+          if [ "$COMPOSITE_IDENTITY" = "$REUSABLE_IDENTITY" ]; then
+            echo "::error::identities must differ — if they match, this Action's packaging has regressed toward the forbidden reusable-workflow shape (see README 'Why composite, not reusable')" >&2
+            exit 1
+          fi
+          case "$COMPOSITE_IDENTITY" in
+            */canary.yml@*) ;;
+            *) echo "::error::composite-caller identity must name canary.yml, got: $COMPOSITE_IDENTITY" >&2; exit 1 ;;
+          esac
+          case "$REUSABLE_IDENTITY" in
+            */_reusable-echo-identity.yml@*) ;;
+            *) echo "::error::reusable-workflow-call identity must name _reusable-echo-identity.yml, got: $REUSABLE_IDENTITY" >&2; exit 1 ;;
+          esac
+          echo "OK: composite-style jobs keep the caller's own identity; workflow_call jobs resolve to the called workflow's identity."

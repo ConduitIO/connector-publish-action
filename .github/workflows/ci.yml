@@ -1,0 +1,51 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# NOTE (see README.md "Known limitations"): github.com/conduitio/conduit is
+# a PRIVATE module. This job needs GOPRIVATE + a token with read access to
+# fetch it — configure the CONDUIT_MODULE_TOKEN repo secret before this
+# workflow can pass. Until then, this is a documented, known-red gate, not
+# a silently-claimed-green one.
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Configure access to the private conduit module
+        env:
+          CONDUIT_MODULE_TOKEN: ${{ secrets.CONDUIT_MODULE_TOKEN }}
+        run: |
+          go env -w GOPRIVATE=github.com/conduitio/conduit
+          git config --global url."https://x-access-token:${CONDUIT_MODULE_TOKEN}@github.com/conduitio/conduit".insteadOf "https://github.com/conduitio/conduit"
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: gofmt
+        run: |
+          fmt_out="$(gofmt -l .)"
+          if [ -n "$fmt_out" ]; then
+            echo "::error::gofmt found unformatted files:"
+            echo "$fmt_out"
+            exit 1
+          fi
+
+      - name: Test (race detector on)
+        run: go test ./... -race -count=1
+
+      - name: Shellcheck
+        uses: ludeeus/action-shellcheck@2.0.0
+        with:
+          scandir: './scripts'

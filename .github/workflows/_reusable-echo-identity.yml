@@ -1,0 +1,18 @@
+name: 'internal: echo resolved identity (reusable)'
+
+on:
+  workflow_call:
+    outputs:
+      resolved-identity:
+        description: 'The SAN this job resolves to, per github.workflow_ref.'
+        value: ${{ jobs.echo.outputs.resolved-identity }}
+
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    outputs:
+      resolved-identity: ${{ steps.echo.outputs.resolved-identity }}
+    steps:
+      - name: Echo this job's own workflow_ref-derived SAN
+        id: echo
+        run: echo "resolved-identity=https://github.com/${{ github.workflow_ref }}" >> "$GITHUB_OUTPUT"
