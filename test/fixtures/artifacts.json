@@ -1,0 +1,38 @@
+[
+  {
+    "os": "linux",
+    "arch": "amd64",
+    "kind": "standalone",
+    "url": "https://github.com/ConduitIO/connector-publish-action/releases/download/e2e-fixture-canned/e2e-fixture_v0.0.0-e2e_linux_amd64",
+    "sha256": "58493b0bf2a96908464f1ca4446efdab05fcef8a460e3659a8bbcc39ddb09e29",
+    "size": 1631733,
+    "signatureBundleURL": "https://github.com/ConduitIO/connector-publish-action/releases/download/e2e-fixture-canned/e2e-fixture_v0.0.0-e2e_linux_amd64.sigstore.json"
+  },
+  {
+    "os": "linux",
+    "arch": "arm64",
+    "kind": "standalone",
+    "url": "https://github.com/ConduitIO/connector-publish-action/releases/download/e2e-fixture-canned/e2e-fixture_v0.0.0-e2e_linux_arm64",
+    "sha256": "1f818349acd5348669e5a888dac3b72eb0cc0a559b4fdaa4261ce1b559fd56d4",
+    "size": 1640058,
+    "signatureBundleURL": "https://github.com/ConduitIO/connector-publish-action/releases/download/e2e-fixture-canned/e2e-fixture_v0.0.0-e2e_linux_arm64.sigstore.json"
+  },
+  {
+    "os": "darwin",
+    "arch": "amd64",
+    "kind": "standalone",
+    "url": "https://github.com/ConduitIO/connector-publish-action/releases/download/e2e-fixture-canned/e2e-fixture_v0.0.0-e2e_darwin_amd64",
+    "sha256": "d49856f956797cd3e020d06dce08b77a750369b28cb9c3729b4f68b8014f7bd6",
+    "size": 1622016,
+    "signatureBundleURL": "https://github.com/ConduitIO/connector-publish-action/releases/download/e2e-fixture-canned/e2e-fixture_v0.0.0-e2e_darwin_amd64.sigstore.json"
+  },
+  {
+    "os": "darwin",
+    "arch": "arm64",
+    "kind": "standalone",
+    "url": "https://github.com/ConduitIO/connector-publish-action/releases/download/e2e-fixture-canned/e2e-fixture_v0.0.0-e2e_darwin_arm64",
+    "sha256": "09e625883197d335b686ed619dc68fa2c7c06eb536bc281421f2ef8879f652be",
+    "size": 1593682,
+    "signatureBundleURL": "https://github.com/ConduitIO/connector-publish-action/releases/download/e2e-fixture-canned/e2e-fixture_v0.0.0-e2e_darwin_arm64.sigstore.json"
+  }
+]

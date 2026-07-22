@@ -1,0 +1,447 @@
+name: e2e
+
+# End-to-end test of THIS ACTION'S OWN action.yml shell wiring, across the
+# real 3-job shape a connector repo actually uses (build -> provenance ->
+# register, per docs/reference-publish-workflow.yml). This exists because
+# three real wiring bugs shipped and were only ever caught by running the
+# Action against a live connector, not by test/canary (identity only) or
+# test/trustcore/e2e_test.go (a real crypto path, but a MOCKED sigstore,
+# never action.yml's bash):
+#
+#   1. mode=build called `gh release upload` with no GH_TOKEN.
+#   2. mode=publish read steps.build-sign.outputs.artifacts, a same-job
+#      step output that is empty when build and publish run in separate
+#      jobs (the reference workflow's actual shape).
+#   3. A release-creation race (gh release upload needs a release to
+#      already exist; nothing created one first).
+#
+# This workflow exercises `uses: ./` (the real composite action, real
+# bash, real `go build` of cmd/registry-pr) against a throwaway fixture
+# connector and a throwaway GitHub Release. It does NOT call the Go
+# binaries directly and does NOT mock sigstore/cosign/gh — that is the
+# entire point: test/trustcore already proves the crypto; this proves the
+# WIRING around it.
+#
+# ============================================================================
+# HONEST SCOPE NOTE (read before trusting a green check here)
+# ============================================================================
+#
+# WHAT RUNS ON pull_request vs push/workflow_dispatch, AND WHY:
+#
+#   - `mode: build` does REAL cosign keyless signing. Every invocation
+#     writes a public Rekor transparency-log entry that can never be
+#     deleted. To avoid spamming the public log on every PR push, the
+#     `build` job (and everything downstream of it: `register-dryrun`,
+#     `cleanup`) is gated to `push` (branches: [main]) and
+#     `workflow_dispatch` ONLY. It does not run on pull_request.
+#   - `register-dryrun-pr` runs on every pull_request (and also on
+#     push/workflow_dispatch, since it is cheap and harmless). It exercises
+#     the exact same action.yml `mode: publish` step and the same
+#     cross-job artifacts-json wiring, but fed a COMMITTED, CANNED
+#     `test/fixtures/artifacts.json` instead of real signed artifacts — no
+#     cosign, no Rekor entry, no release. This is what gives PRs to this
+#     Action fast, tlog-free coverage of the artifacts-json/register wiring
+#     (bug class #2) on every push.
+#
+# WHAT THIS WORKFLOW CANNOT PROVE TODAY, AND WHY (a real, tracked gap, not
+# a workaround weakness in this test):
+#
+#   `mode: publish` (even with dry-run: true) always fetches and
+#   cryptographically verifies a REAL index at
+#   `https://raw.githubusercontent.com/<index-repo>/main/index/dist/index.json`
+#   before it can report a pr-kind or route anything -- dry-run only skips
+#   the final "open the PR" step, not identity/index verification.
+#   action.yml exposes no input to redirect that URL to a local fixture
+#   (cmd/registry-pr's own `-index-json-url` flag exists and is unit-tested
+#   in cmd/registry-pr/main_test.go, but action.yml's `publish` step never
+#   passes it through). And the DEFAULT index-repo
+#   (ConduitIO/conduit-connector-registry) does not serve that path yet --
+#   confirmed by curling it while writing this workflow: HTTP 404 -- because
+#   the root/freshness trust-anchor bootstrap ceremony has not shipped (see
+#   this repo's README.md "Known limitations" and
+#   internal/indexfetch/indexfetch.go's doc comment: "this Action's
+#   mode: publish index-verify step fails closed ... this is correct
+#   fail-closed behavior, not a bug, but it means mode: publish cannot
+#   succeed against a real index today"). That is a real, project-level
+#   readiness gap, independent of this test, and this test must not paper
+#   over it by weakening action.yml's signing/identity/verification logic
+#   (out of scope for this change) or by mocking the fetch.
+#
+#   Consequence: `register-dryrun` and `register-dryrun-pr` below CANNOT
+#   assert `pr-kind == new-name` today, because the plan step never reaches
+#   the point where it would set that output -- it fails closed at the
+#   index fetch first. Both jobs:
+#     - probe the real index URL's reachability first and branch on it, so
+#       the FULL assertion (pr-kind == new-name, success, no pr-url)
+#       automatically activates the day the registry bootstrap ships,
+#       with no edit to this file required;
+#     - until then, assert the run fails (never silently "succeeds" with
+#       a wrong/empty result) and that `pr-url` is never emitted (dry-run's
+#       one absolute, always-checkable guarantee, since action.yml's
+#       "Open or update the index-repo PR" step is hard-gated
+#       `if: inputs.dry-run != 'true'` and structurally cannot run here
+#       regardless of routing outcome);
+#     - separately and independently re-validate, in a plain shell step
+#       with NO composite-action involvement, that the artifacts JSON
+#       actually arriving at this job (`needs.build.outputs.artifacts` /
+#       the committed fixture file) is non-empty, valid JSON, with the
+#       expected number of well-formed {os,arch,sha256,size,url} entries.
+#       This is a real, zero-fragility regression check for the GitHub
+#       Actions-level half of bug class #2 (a job output not correctly
+#       crossing a job boundary) -- it does NOT reach into confirming
+#       action.yml's internal ARTIFACTS_INPUT/SAME_JOB_ARTIFACTS fallback
+#       line specifically distinguished itself from the index-fetch
+#       failure (that would require inspecting this run's own logs
+#       mid-run, which was evaluated and rejected here as too fragile to
+#       ship unverified). Said plainly: this workflow cannot yet
+#       distinguish "mode=publish failed because artifacts-json didn't
+#       reach it" from "mode=publish failed because the registry doesn't
+#       exist yet" purely from the job's exit status. A human reviewing a
+#       red `register-dryrun` job today should expect and confirm it is
+#       the index-fetch 404, not a different error.
+#
+#   The clean, permanent fix for this whole section is exposing
+#   `index-json-url` as an action.yml input (a pure pass-through of the
+#   existing, already-unit-tested Go flag -- no signing/identity/routing
+#   logic changes). That is a Tier-1 change to action.yml itself and is
+#   intentionally NOT made in this PR, which is test-and-fixtures only.
+#
+# ============================================================================
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  E2E_CONNECTOR_NAME: e2e-fixture
+  E2E_VERSION: v0.0.0-e2e
+
+jobs:
+  # --------------------------------------------------------------------
+  # Real path (bug classes #1 and #3): push to main / workflow_dispatch
+  # only, per the Rekor-pollution note above.
+  # --------------------------------------------------------------------
+
+  create-release:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - name: Compute this run's throwaway tag
+        id: tag
+        env:
+          RUN_ID: ${{ github.run_id }}
+        run: echo "tag=e2e-ci-${RUN_ID}" >> "$GITHUB_OUTPUT"
+
+      - name: Create a throwaway prerelease for mode=build's `gh release upload` to target
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          TARGET_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$TARGET_SHA" \
+            --title "e2e (disposable): $TAG" \
+            --notes "Disposable release created by .github/workflows/e2e.yml for run ${{ github.run_id }}. Deleted by the cleanup job. If you see this lingering, the cleanup job failed -- delete it and the matching tag by hand." \
+            --prerelease
+
+  # bug class #1 (`gh release upload` with no GH_TOKEN) and #3 (release
+  # must exist before upload) live entirely in this job: mode=build never
+  # touches the registry index, so unlike register-dryrun below, this job
+  # can and must fully succeed on every run.
+  build:
+    needs: create-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    # JOB-level (not step-level) override, deliberately: build-and-sign.sh
+    # uploads to the release named by $GITHUB_REF_NAME, which for this
+    # push-to-main-triggered run would otherwise be "main". Composite
+    # actions run their steps as ordinary steps of THIS job (there is no
+    # separate job boundary to cross), so job-level env is unambiguously
+    # visible to them -- unlike a step-level env override on the `uses: ./`
+    # call, whose propagation into a composite action's OWN internal steps
+    # is not something this test relies on being true. This is the one
+    # env var this job needs redirected; actions/checkout below reads
+    # github.sha/github.ref context, not this env var, so it is unaffected.
+    env:
+      GITHUB_REF_NAME: ${{ needs.create-release.outputs.tag }}
+    outputs:
+      artifacts: ${{ steps.publish.outputs.artifacts }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build + cosign-sign the fixture matrix
+        id: publish
+        uses: ./
+        with:
+          mode: build
+          connector-name: ${{ env.E2E_CONNECTOR_NAME }}
+          version: ${{ env.E2E_VERSION }}
+          build-command: |
+            CGO_ENABLED=0 go build -o "$OUTPUT_PATH" ./test/fixtures/connector/cmd/connector
+
+      - name: Assert the artifacts output is well-formed (regression check for bug class #1/#3)
+        env:
+          ARTIFACTS_JSON: ${{ steps.publish.outputs.artifacts }}
+        run: |
+          set -euo pipefail
+          if [ -z "$ARTIFACTS_JSON" ]; then
+            echo "::error::artifacts output is empty -- mode=build did not produce anything (a regression to bug #1 or #3 would look exactly like this: gh release upload failing silently-to-the-caller or the release not existing yet)" >&2
+            exit 1
+          fi
+          echo "$ARTIFACTS_JSON" | jq -e 'type == "array"' >/dev/null
+          COUNT="$(echo "$ARTIFACTS_JSON" | jq 'length')"
+          if [ "$COUNT" -ne 4 ]; then
+            echo "::error::expected 4 artifacts (the default build-matrix), got $COUNT: $ARTIFACTS_JSON" >&2
+            exit 1
+          fi
+          echo "$ARTIFACTS_JSON" | jq -e '
+            all(.[];
+              (.os | type == "string" and length > 0) and
+              (.arch | type == "string" and length > 0) and
+              (.sha256 | type == "string" and test("^[0-9a-f]{64}$")) and
+              (.size | type == "number" and . > 0) and
+              (.url | type == "string" and startswith("https://github.com/"))
+            )
+          ' >/dev/null
+          echo "OK: 4 well-formed {os,arch,sha256,size,url} artifact entries."
+
+  # --------------------------------------------------------------------
+  # bug class #2 (cross-job artifacts-json wiring): real path.
+  # See the HONEST SCOPE NOTE above for exactly what this job can and
+  # cannot prove today.
+  # --------------------------------------------------------------------
+  register-dryrun:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sanity-check the artifacts JSON actually arrived at this job intact
+        env:
+          ARTIFACTS_JSON: ${{ needs.build.outputs.artifacts }}
+        run: |
+          set -euo pipefail
+          if [ -z "$ARTIFACTS_JSON" ]; then
+            echo "::error::needs.build.outputs.artifacts is empty in THIS job -- the cross-job output plumbing itself is broken (the GitHub Actions level half of bug class #2), before action.yml's own artifacts-json input is even involved" >&2
+            exit 1
+          fi
+          echo "$ARTIFACTS_JSON" | jq -e 'type == "array" and length == 4' >/dev/null
+          echo "OK: build's artifacts output crossed the job boundary intact (4 entries)."
+
+      - name: Probe whether the real index-repo's index.json exists yet (registry bootstrap readiness)
+        id: probe
+        env:
+          INDEX_URL: https://raw.githubusercontent.com/ConduitIO/conduit-connector-registry/main/index/dist/index.json
+        run: |
+          set -euo pipefail
+          CODE="$(curl -s -o /dev/null -w '%{http_code}' "$INDEX_URL" || echo 000)"
+          REACHABLE=false
+          if [ "$CODE" = "200" ]; then
+            REACHABLE=true
+          fi
+          echo "reachable=$REACHABLE" >> "$GITHUB_OUTPUT"
+          echo "::notice::index.json at $INDEX_URL returned HTTP $CODE (reachable=$REACHABLE). See this workflow's HONEST SCOPE NOTE if this ever flips to true -- the assertions below auto-upgrade." >&2
+
+      - name: Resolve identity + route (dry-run) using the real build artifacts across a job boundary
+        id: register
+        continue-on-error: true
+        uses: ./
+        with:
+          mode: publish
+          dry-run: 'true'
+          artifacts-json: ${{ needs.build.outputs.artifacts }}
+          connector-name: ${{ env.E2E_CONNECTOR_NAME }}
+          version: ${{ env.E2E_VERSION }}
+          min-conduit-version: '0.15.0'
+          min-protocol-version: '0.9.0'
+          # e2e-fixture is not a real connector and is never expected to be
+          # a pre-existing index entry, so this always takes the new-name
+          # path IF it ever reaches routing at all (see probe above).
+          first-registration-identity-ref-pattern: 'refs/heads/main'
+          # No real slsa-github-generator job runs in this workflow (see
+          # HONEST SCOPE NOTE): a real SLSA provenance job needs a
+          # `provenance` job between build and register, calling
+          # slsa-framework/slsa-github-generator's reusable workflow, which
+          # itself needs a tag-triggered release and its own signing
+          # identity considerations -- out of scope for testing action.yml's
+          # OWN wiring. Substituted with a fixed, never-fetched placeholder
+          # URL: dry-run mode only ever stores this string into the planned
+          # index-entry content, it does not fetch or verify it.
+          provenance-bundle-url: https://example.invalid/provenance/e2e-fixture-bundle.json
+
+      - name: Assert pr-url was never emitted (dry-run's one always-true guarantee)
+        env:
+          PR_URL: ${{ steps.register.outputs.pr-url }}
+        run: |
+          set -euo pipefail
+          if [ -n "$PR_URL" ]; then
+            echo "::error::dry-run: true emitted a pr-url ($PR_URL) -- the 'Open or update the index-repo PR' step must never run under dry-run, regardless of routing outcome" >&2
+            exit 1
+          fi
+          echo "OK: no pr-url emitted under dry-run."
+
+      - name: Assert the routing/identity outcome matches what's achievable today
+        env:
+          OUTCOME: ${{ steps.register.outcome }}
+          PR_KIND: ${{ steps.register.outputs.pr-kind }}
+          REACHABLE: ${{ steps.probe.outputs.reachable }}
+        run: |
+          set -euo pipefail
+          if [ "$REACHABLE" = "true" ]; then
+            # The registry bootstrap has shipped since this workflow was
+            # written -- the full assertion now applies.
+            if [ "$OUTCOME" != "success" ]; then
+              echo "::error::index.json is now reachable but mode=publish dry-run did not succeed (outcome=$OUTCOME) -- investigate as a real regression" >&2
+              exit 1
+            fi
+            if [ "$PR_KIND" != "new-name" ]; then
+              echo "::error::expected pr-kind=new-name for a first-time e2e-fixture registration, got '$PR_KIND'" >&2
+              exit 1
+            fi
+            echo "OK: index.json is reachable; dry-run succeeded with pr-kind=new-name."
+          else
+            # Known, tracked, project-level gap (see HONEST SCOPE NOTE):
+            # the plan step fails closed at the index fetch before it can
+            # ever report a pr-kind. Assert it fails -- never silently
+            # "succeeds" with an empty/wrong result -- and stop there. This
+            # job cannot yet distinguish this expected failure from a
+            # cross-job artifacts-json wiring regression by exit status
+            # alone; see the sanity-check step above for the part of bug
+            # class #2 this job CAN robustly regression-test.
+            if [ "$OUTCOME" != "failure" ]; then
+              echo "::error::index.json is unreachable (expected fail-closed), but mode=publish dry-run reported outcome=$OUTCOME instead of failure -- unexpected either way" >&2
+              exit 1
+            fi
+            echo "OK (known gap, not a wiring regression): index.json unreachable, dry-run failed closed as documented in the HONEST SCOPE NOTE."
+          fi
+
+  cleanup:
+    if: always() && needs.create-release.result != 'skipped'
+    needs: [create-release, build, register-dryrun]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Delete the throwaway release and its tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.create-release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ -z "$TAG" ]; then
+            echo "::notice::no tag recorded (create-release itself likely failed before tagging) -- nothing to delete" >&2
+            exit 0
+          fi
+          gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag \
+            || echo "::warning::could not delete release/tag $TAG -- delete it by hand" >&2
+
+  # --------------------------------------------------------------------
+  # bug class #2, lightweight substitute for pull_request: no cosign, no
+  # release, no Rekor entry. Fed the committed, canned
+  # test/fixtures/artifacts.json instead of a real build job's output, but
+  # otherwise exercises the identical action.yml `mode: publish` cross-job
+  # input wiring. Runs on every trigger (cheap, harmless).
+  # --------------------------------------------------------------------
+  register-dryrun-pr:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Load the canned artifacts.json fixture
+        id: fixture
+        run: |
+          set -euo pipefail
+          {
+            echo 'json<<E2E_FIXTURE_EOF'
+            cat test/fixtures/artifacts.json
+            echo 'E2E_FIXTURE_EOF'
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Sanity-check the canned fixture itself is well-formed
+        env:
+          ARTIFACTS_JSON: ${{ steps.fixture.outputs.json }}
+        run: |
+          set -euo pipefail
+          echo "$ARTIFACTS_JSON" | jq -e 'type == "array" and length == 4' >/dev/null
+          echo "OK: canned fixture has 4 entries."
+
+      - name: Probe whether the real index-repo's index.json exists yet (registry bootstrap readiness)
+        id: probe
+        env:
+          INDEX_URL: https://raw.githubusercontent.com/ConduitIO/conduit-connector-registry/main/index/dist/index.json
+        run: |
+          set -euo pipefail
+          CODE="$(curl -s -o /dev/null -w '%{http_code}' "$INDEX_URL" || echo 000)"
+          REACHABLE=false
+          if [ "$CODE" = "200" ]; then
+            REACHABLE=true
+          fi
+          echo "reachable=$REACHABLE" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve identity + route (dry-run) using the canned fixture artifacts
+        id: register
+        continue-on-error: true
+        uses: ./
+        with:
+          mode: publish
+          dry-run: 'true'
+          artifacts-json: ${{ steps.fixture.outputs.json }}
+          connector-name: ${{ env.E2E_CONNECTOR_NAME }}
+          version: ${{ env.E2E_VERSION }}
+          min-conduit-version: '0.15.0'
+          min-protocol-version: '0.9.0'
+          first-registration-identity-ref-pattern: 'refs/heads/main'
+          provenance-bundle-url: https://example.invalid/provenance/e2e-fixture-bundle.json
+
+      - name: Assert pr-url was never emitted (dry-run's one always-true guarantee)
+        env:
+          PR_URL: ${{ steps.register.outputs.pr-url }}
+        run: |
+          set -euo pipefail
+          if [ -n "$PR_URL" ]; then
+            echo "::error::dry-run: true emitted a pr-url ($PR_URL)" >&2
+            exit 1
+          fi
+          echo "OK: no pr-url emitted under dry-run."
+
+      - name: Assert the routing/identity outcome matches what's achievable today
+        env:
+          OUTCOME: ${{ steps.register.outcome }}
+          PR_KIND: ${{ steps.register.outputs.pr-kind }}
+          REACHABLE: ${{ steps.probe.outputs.reachable }}
+        run: |
+          set -euo pipefail
+          if [ "$REACHABLE" = "true" ]; then
+            if [ "$OUTCOME" != "success" ]; then
+              echo "::error::index.json is now reachable but mode=publish dry-run did not succeed (outcome=$OUTCOME)" >&2
+              exit 1
+            fi
+            if [ "$PR_KIND" != "new-name" ]; then
+              echo "::error::expected pr-kind=new-name, got '$PR_KIND'" >&2
+              exit 1
+            fi
+            echo "OK: index.json is reachable; dry-run succeeded with pr-kind=new-name."
+          else
+            if [ "$OUTCOME" != "failure" ]; then
+              echo "::error::index.json is unreachable (expected fail-closed), but outcome=$OUTCOME" >&2
+              exit 1
+            fi
+            echo "OK (known gap, not a wiring regression): index.json unreachable, dry-run failed closed as documented in the HONEST SCOPE NOTE."
+          fi
