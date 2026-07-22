@@ -54,6 +54,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The Action uploads signed assets with `gh release upload`, which does
+      # NOT create the release. If your repo also has a goreleaser release.yml
+      # on the same tag, the two race with no ordering — create the release
+      # here if absent (idempotent), and set goreleaser `release.mode:
+      # keep-existing` so neither workflow fails on, or deletes, the other's
+      # assets. Safe to keep even without goreleaser.
+      - name: Ensure the release exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "$TAG" --generate-notes \
+            || echo "release $TAG already exists — nothing to create"
+
       - name: Build + cosign-sign the artifact matrix
         id: publish
         uses: ConduitIO/connector-publish-action@v1
