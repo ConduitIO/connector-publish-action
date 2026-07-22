@@ -3,20 +3,40 @@ name: 'composite-vs-reusable identity canary'
 # This is the permanent regression test against ever shipping this Action
 # as a `workflow_call` reusable workflow (README.md "Why composite, not
 # reusable" / step4-publishing-action.md §5's "reusable-workflow
-# misconfiguration" row): it asserts that a normal job's resolved SAN
-# (job_workflow_ref) stays THIS CALLER'S own workflow path — the shape a
-# composite action's steps inherit, since composite steps never introduce
-# a `uses: .../workflow.yml@ref` job boundary — while a job defined via
-# `uses: .../workflow.yml@ref` (a genuine reusable-workflow call) resolves
-# to the CALLED workflow's own path instead.
+# misconfiguration" row).
 #
-# HONEST SCOPE NOTE: this demonstrates the underlying job_workflow_ref
-# mechanism within a single repository (this one), which is the root cause
-# the whole composite-vs-reusable design decision rests on and is
-# independent of which repo either job lives in. It does not (yet) run a
-# true cross-repository canary (two disposable connector-repo-shaped
-# fixtures each `uses:`-ing this Action) — that is flagged as a follow-up
-# in the PR description, not silently substituted for.
+# WHAT IT ACTUALLY CHECKS: the OIDC id-token's `job_workflow_ref` CLAIM —
+# which is what becomes the Fulcio certificate's SAN, which is what
+# `publisher.expectedIdentityPattern` pins per connector name — not the
+# `github.workflow_ref` CONTEXT VARIABLE. That distinction is the entire
+# point of this file: `github.workflow_ref` always reflects the run's
+# top-level entry workflow regardless of any nested `workflow_call`
+# boundary, so asserting on it would compare the same value against itself
+# every time (always "passing" as identical, i.e. never actually detecting
+# the misuse it exists to catch — and if it ever did differ, it would be
+# testing the wrong thing anyway). Only the real OIDC token's
+# `job_workflow_ref` claim resolves to the CALLED reusable workflow's own
+# path. `_reusable-echo-identity.yml` and the `as_composite_caller` job
+# below both fetch a real id-token (`actions/github-script` +
+# `core.getIDToken()`) and decode that claim directly.
+#
+# THE PROPERTY BEING PROVED: a normal job in a top-level workflow (the
+# shape a composite action's steps inherit, since composite steps never
+# introduce a `uses: .../workflow.yml@ref` job boundary) resolves
+# `job_workflow_ref` to ITS OWN workflow file — exactly why the production
+# identity computation in `action.yml`/`internal/identity` is correct when
+# this Action runs as composite steps inside a connector repo's publish.yml.
+# A job defined via `uses: ./.github/workflows/x.yml@ref` (a genuine
+# reusable-workflow call) resolves instead to the CALLED workflow's own
+# path — the misuse this canary exists to catch.
+#
+# HONEST SCOPE NOTE: both jobs live in this one repository, so this proves
+# the job_workflow_ref mechanism itself (repo-independent, and the root
+# cause the whole composite-vs-reusable design decision rests on) — it is
+# NOT (yet) a true cross-repository canary with two disposable
+# connector-repo-shaped fixtures each `uses:`-ing this Action from a
+# different repo. That remains a follow-up, flagged in the PR description,
+# not silently substituted for.
 
 on:
   push:
@@ -24,23 +44,54 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  id-token: write
+
 jobs:
   # Represents how a composite action's steps resolve identity: they run
-  # INSIDE this job, so this job's own workflow_ref is what a caller's
-  # cosign signature would use — never `_reusable-echo-identity.yml`'s.
+  # INSIDE this job, so this job's own job_workflow_ref claim is what a
+  # caller's cosign signature would use — never
+  # `_reusable-echo-identity.yml`'s.
   as_composite_caller:
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
     outputs:
       resolved-identity: ${{ steps.echo.outputs.resolved-identity }}
     steps:
-      - name: Echo this job's own workflow_ref-derived SAN
+      # Keep this script in sync with _reusable-echo-identity.yml's `echo`
+      # step — both decode the same claim the same way so the two outputs
+      # are actually comparable.
+      - name: Fetch this job's real OIDC id-token and decode job_workflow_ref
         id: echo
-        run: echo "resolved-identity=https://github.com/${{ github.workflow_ref }}" >> "$GITHUB_OUTPUT"
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const idToken = await core.getIDToken();
+            const parts = idToken.split('.');
+            if (parts.length !== 3) {
+              core.setFailed(`malformed OIDC id-token: expected 3 dot-separated segments, got ${parts.length}`);
+              return;
+            }
+            let payload = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+            while (payload.length % 4) {
+              payload += '=';
+            }
+            const claims = JSON.parse(Buffer.from(payload, 'base64').toString('utf8'));
+            const jobWorkflowRef = claims.job_workflow_ref;
+            if (!jobWorkflowRef) {
+              core.setFailed(`OIDC id-token has no job_workflow_ref claim: ${JSON.stringify(claims)}`);
+              return;
+            }
+            core.info(`job_workflow_ref: ${jobWorkflowRef}`);
+            core.setOutput('resolved-identity', `https://github.com/${jobWorkflowRef}`);
 
   # A genuine reusable-workflow call: per GitHub's OIDC job_workflow_ref
   # claim semantics, THIS job's resolved identity is
   # _reusable-echo-identity.yml's own path, not canary.yml's.
   as_reusable_workflow_call:
+    permissions:
+      id-token: write
     uses: ./.github/workflows/_reusable-echo-identity.yml
 
   assert_identities_differ:
@@ -53,8 +104,13 @@ jobs:
           REUSABLE_IDENTITY: ${{ needs.as_reusable_workflow_call.outputs.resolved-identity }}
         run: |
           set -euo pipefail
-          echo "composite-caller identity: $COMPOSITE_IDENTITY"
-          echo "reusable-workflow-call identity: $REUSABLE_IDENTITY"
+          echo "composite-caller identity (job_workflow_ref claim): $COMPOSITE_IDENTITY"
+          echo "reusable-workflow-call identity (job_workflow_ref claim): $REUSABLE_IDENTITY"
+
+          if [ -z "$COMPOSITE_IDENTITY" ] || [ -z "$REUSABLE_IDENTITY" ]; then
+            echo "::error::one or both identities are empty — the OIDC id-token fetch or decode failed upstream" >&2
+            exit 1
+          fi
 
           if [ "$COMPOSITE_IDENTITY" = "$REUSABLE_IDENTITY" ]; then
             echo "::error::identities must differ — if they match, this Action's packaging has regressed toward the forbidden reusable-workflow shape (see README 'Why composite, not reusable')" >&2
@@ -68,4 +124,4 @@ jobs:
             */_reusable-echo-identity.yml@*) ;;
             *) echo "::error::reusable-workflow-call identity must name _reusable-echo-identity.yml, got: $REUSABLE_IDENTITY" >&2; exit 1 ;;
           esac
-          echo "OK: composite-style jobs keep the caller's own identity; workflow_call jobs resolve to the called workflow's identity."
+          echo "OK: composite-style jobs keep the caller's own identity; workflow_call jobs resolve to the called workflow's identity — both verified via the real OIDC job_workflow_ref claim, not the github.workflow_ref context variable."

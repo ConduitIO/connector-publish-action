@@ -1,11 +1,18 @@
 name: 'internal: echo resolved identity (reusable)'
 
+# Echoes the REAL job_workflow_ref claim from this job's own OIDC id-token —
+# not the `github.workflow_ref` context variable (see canary.yml's header
+# comment for why that distinction is the whole point of this file).
+
 on:
   workflow_call:
     outputs:
       resolved-identity:
-        description: 'The SAN this job resolves to, per github.workflow_ref.'
+        description: 'The SAN this job resolves to, per the OIDC id-token job_workflow_ref claim.'
         value: ${{ jobs.echo.outputs.resolved-identity }}
+
+permissions:
+  id-token: write
 
 jobs:
   echo:
@@ -13,6 +20,29 @@ jobs:
     outputs:
       resolved-identity: ${{ steps.echo.outputs.resolved-identity }}
     steps:
-      - name: Echo this job's own workflow_ref-derived SAN
+      # Keep this script in sync with canary.yml's `as_composite_caller`
+      # job — both decode the same claim the same way so the two outputs
+      # are actually comparable.
+      - name: Fetch this job's real OIDC id-token and decode job_workflow_ref
         id: echo
-        run: echo "resolved-identity=https://github.com/${{ github.workflow_ref }}" >> "$GITHUB_OUTPUT"
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const idToken = await core.getIDToken();
+            const parts = idToken.split('.');
+            if (parts.length !== 3) {
+              core.setFailed(`malformed OIDC id-token: expected 3 dot-separated segments, got ${parts.length}`);
+              return;
+            }
+            let payload = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+            while (payload.length % 4) {
+              payload += '=';
+            }
+            const claims = JSON.parse(Buffer.from(payload, 'base64').toString('utf8'));
+            const jobWorkflowRef = claims.job_workflow_ref;
+            if (!jobWorkflowRef) {
+              core.setFailed(`OIDC id-token has no job_workflow_ref claim: ${JSON.stringify(claims)}`);
+              return;
+            }
+            core.info(`job_workflow_ref: ${jobWorkflowRef}`);
+            core.setOutput('resolved-identity', `https://github.com/${jobWorkflowRef}`);

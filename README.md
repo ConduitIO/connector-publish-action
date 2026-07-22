@@ -55,9 +55,9 @@ name.
   That is exactly the shape `publisher.expectedIdentityPattern` in the frozen index schema encodes.
 
 `.github/workflows/canary.yml` in this repo enforces this structurally, not just as a design note:
-it publishes from two disposable repos and asserts the two resolved SANs differ (see
-"Composite-vs-reusable canary" below) — a regression back to a reusable workflow fails this
-repo's own CI.
+it decodes the real OIDC `job_workflow_ref` claim for a composite-shaped job and a genuine
+reusable-workflow-call job and asserts the two resolved SANs differ (see "Composite-vs-reusable
+canary" below) — a regression back to a reusable workflow fails this repo's own CI.
 
 ## Why SLSA provenance needs the opposite
 
@@ -134,11 +134,24 @@ reaches automerge even if it somehow reached the index-PR stage at all.
 
 ## Composite-vs-reusable canary
 
-`.github/workflows/canary.yml` (this repo's own CI, not a connector repo's) publishes a trivial
-build from two disposable repos under different owners and asserts the two resulting
-`resolved-identity` outputs differ and each matches only its own repo — the concrete,
-permanent regression test against ever shipping this Action as a reusable workflow by accident
-(see `step4-publishing-action.md` §5's "reusable-workflow misconfiguration" row).
+`.github/workflows/canary.yml` (this repo's own CI, not a connector repo's) runs two jobs in a
+single workflow run: `as_composite_caller`, a normal job standing in for the shape a composite
+action's steps inherit, and `as_reusable_workflow_call`, a job defined via
+`uses: ./.github/workflows/_reusable-echo-identity.yml` standing in for the misuse this Action must
+never ship as. Both jobs fetch a real OIDC id-token (`actions/github-script` +
+`core.getIDToken()`) and decode its `job_workflow_ref` claim directly — the actual value that
+becomes the Fulcio certificate's SAN, **not** the `github.workflow_ref` context variable (which
+always reflects the run's top-level entry workflow regardless of any nested `workflow_call`
+boundary, so it can't distinguish the two shapes at all). A third job asserts the two decoded
+identities differ and each names the right workflow file — the concrete, permanent regression test
+against ever shipping this Action as a reusable workflow by accident (see
+`step4-publishing-action.md` §5's "reusable-workflow misconfiguration" row).
+
+**Honest scope note:** both jobs live in this one repository, so this proves the underlying
+`job_workflow_ref` mechanism itself (repo-independent, and the root cause the whole
+composite-vs-reusable design decision rests on) — it is not yet a true cross-repository canary
+with two disposable connector-repo-shaped fixtures each `uses:`-ing this Action from a different
+repo. That remains a follow-up, not silently substituted for.
 
 ## Known limitations (read before relying on this in production)
 
@@ -156,16 +169,12 @@ permanent regression test against ever shipping this Action as a reusable workfl
   index whose *latest* signature is root-signed, never a freshness-only heartbeat re-sign. If the
   index repo's automation ever needs this Action to route against a freshness-only-signed index,
   that requires passing a real previous hash in, not a change to this repo's verification logic.
-- **`github.com/conduitio/conduit` is a private module.** `go.mod` requires it at a placeholder
-  pseudo-version (`v0.0.0-00010101000000-000000000000`) — this repo's own CI (and any consumer
-  building `cmd/registry-pr` from source) needs `GOPRIVATE=github.com/conduitio/conduit` plus a
-  token with read access, configured as a repo secret (`CONDUIT_MODULE_TOKEN`, referenced by
-  `.github/workflows/ci.yml` and `release.yml` but **not yet added** to this repo's secrets — both
-  workflows are known-red until it is). `.github/workflows/release.yml` builds `registry-pr`
-  binaries per OS/arch and attaches them to tagged releases so *consuming* connector repos never
-  need `GOPRIVATE`/module access themselves — but `action.yml`'s `mode: publish` step still builds
-  `registry-pr` from source at call time (via `actions/setup-go`) rather than downloading the
-  pre-built binary; wiring that download in is a follow-up, not done in this PR.
+- **`action.yml`'s `mode: publish` step still builds `registry-pr` from source at call time** (via
+  `actions/setup-go`) rather than downloading the pre-built binary that `.github/workflows/release.yml`
+  already attaches to tagged releases per OS/arch. `github.com/conduitio/conduit` is a public module
+  (no `GOPRIVATE`/token needed to build this repo — see `go.mod`, pinned to a real commit on
+  `ConduitIO/conduit`'s `main`), so building from source works today; wiring the pre-built-binary
+  download in is still a follow-up, not done in this PR.
 - **`index/connectors/<name>.json` is this Action's assumption about the index repo's per-connector
   source-file convention**, not a confirmed one — the index repo itself (plan-v2 §8) doesn't exist
   yet. If the real index repo uses a different layout, only `cmd/registry-pr`'s

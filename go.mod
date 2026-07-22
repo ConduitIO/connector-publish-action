@@ -2,20 +2,8 @@ module github.com/ConduitIO/connector-publish-action
 
 go 1.25.8
 
-// github.com/conduitio/conduit is a PRIVATE module (see README.md "Known
-// limitations"). The pseudo-version below is a PLACEHOLDER — it does not
-// resolve against a real, fetchable commit today. Building/testing this
-// repo requires either:
-//   - a real pinned pseudo-version, obtained via
-//     `GOPRIVATE=github.com/conduitio/conduit go get github.com/conduitio/conduit@<commit-or-tag>`
-//     once this repo has git-credential access to ConduitIO/conduit configured
-//     (see .github/workflows/ci.yml's CONDUIT_MODULE_TOKEN), or
-//   - a local `replace github.com/conduitio/conduit => /path/to/local/checkout`
-//     for development, never committed.
-// This is flagged explicitly in the PR description as a known follow-up,
-// not silently worked around.
 require (
-	github.com/conduitio/conduit v0.0.0-00010101000000-000000000000
+	github.com/conduitio/conduit v0.18.0-nightly.20260722.0.20260722163009-946ec22e25b0
 	github.com/google/go-cmp v0.7.0
 	github.com/sigstore/sigstore-go v1.2.2
 )

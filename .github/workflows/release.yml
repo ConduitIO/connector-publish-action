@@ -1,17 +1,12 @@
 name: release
 
 # Builds static `registry-pr` binaries and attaches them to the GitHub
-# Release for the pushed tag, so CONSUMING connector repos never need
-# GOPRIVATE / a github.com/conduitio/conduit-scoped token themselves — only
-# this repo's own release pipeline does (see README.md "Known limitations").
-# action.yml's mode=publish step downloads the binary matching the runner's
-# OS/arch from this release instead of building from source at call time.
-#
-# NOTE: needs the same CONDUIT_MODULE_TOKEN secret as ci.yml until
-# github.com/conduitio/conduit is reachable some other way (e.g. a
-# dedicated read-only deploy key, or the module becomes public). Not yet
-# configured — flagged in the PR description as a follow-up before the
-# first real tagged release.
+# Release for the pushed tag, so CONSUMING connector repos never need to
+# build this repo's Go module themselves — only this repo's own release
+# pipeline does. action.yml's mode=publish step downloads the binary
+# matching the runner's OS/arch from this release instead of building from
+# source at call time (that download-wiring is still a follow-up — see
+# README.md "Known limitations").
 
 on:
   push:
@@ -41,13 +36,6 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-
-      - name: Configure access to the private conduit module
-        env:
-          CONDUIT_MODULE_TOKEN: ${{ secrets.CONDUIT_MODULE_TOKEN }}
-        run: |
-          go env -w GOPRIVATE=github.com/conduitio/conduit
-          git config --global url."https://x-access-token:${CONDUIT_MODULE_TOKEN}@github.com/conduitio/conduit".insteadOf "https://github.com/conduitio/conduit"
 
       - name: Build registry-pr for ${{ matrix.os }}/${{ matrix.arch }}
         env:

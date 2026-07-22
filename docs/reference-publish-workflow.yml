@@ -88,9 +88,9 @@ jobs:
     # Pin this to a specific, reviewed tag — this ref IS
     # pkg/registry/trust.ExpectedBuilderID's expected value. Changing it is
     # a breaking change for every already-registered connector identity;
-    # see connector-publish-action's own canary test
-    # (test/canary/generator-ref_test.go) that fails loudly if this ref
-    # ever drifts from the conduit-pinned constant.
+    # see connector-publish-action's own drift-guard test
+    # (test/canary/generator_ref_test.go) that fails loudly at PR time if
+    # this ref ever drifts from the conduit-pinned constant.
     uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
     with:
       base64-subjects: ${{ needs.build.outputs.hashes }}
