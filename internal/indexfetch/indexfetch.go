@@ -26,6 +26,7 @@ package indexfetch
 import (
 	"context"
 	"crypto/ed25519"
+	_ "embed"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -122,12 +123,23 @@ type anchorFile struct {
 	Freshness map[string]string `json:"freshness"`
 }
 
-// LoadTrustAnchors parses path (see anchorFile) into a conduitindex.TrustAnchors.
-// An empty path returns the zero value (no anchors) — Verify then fails
-// closed with CodeTrustAnchorExpired, per this package's doc comment.
+// embeddedAnchors is the production ceremony trust-anchor set (root +
+// freshness PUBLIC keys), the same anchors conduit compiles into its client.
+// The Action must verify the served index against these — conduit embeds them
+// in its cmd layer, which this Action can't import, so we carry a copy here
+// (public keys only; keyIds match conduitindex.KeyID). Overridable via
+// -trust-anchors-json for a fixture index or a private registry.
+//
+//go:embed trustanchors/anchors.json
+var embeddedAnchors []byte
+
+// LoadTrustAnchors parses raw (see anchorFile) into a conduitindex.TrustAnchors.
+// Empty raw falls back to the embedded production ceremony anchors, so a normal
+// invocation verifies the real served index; pass -trust-anchors-json to
+// override (fixture / private registry).
 func LoadTrustAnchors(raw []byte) (conduitindex.TrustAnchors, error) {
 	if len(raw) == 0 {
-		return conduitindex.TrustAnchors{}, nil
+		raw = embeddedAnchors
 	}
 	var af anchorFile
 	if err := json.Unmarshal(raw, &af); err != nil {
