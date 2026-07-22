@@ -110,6 +110,13 @@ inputs:
       this job's own build-sign step output (only populated for same-job use).
     required: false
     default: ''
+  index-json-url:
+    description: >-
+      "publish" mode only: override the signed index.json URL that register
+      fetches + verifies. Default is the served registry URL. Set this to a
+      fixture URL for end-to-end tests, or to a private registry's index.
+    required: false
+    default: ''
 
 outputs:
   artifacts:
@@ -180,6 +187,9 @@ runs:
         # the shell.
         ARTIFACTS_INPUT: ${{ inputs.artifacts-json }}
         SAME_JOB_ARTIFACTS: ${{ steps.build-sign.outputs.artifacts }}
+        # Empty ⇒ the binary uses its served-registry default. Via env (not
+        # interpolated into the command) so a URL value can't inject.
+        INDEX_JSON_URL: ${{ inputs.index-json-url }}
       run: |
         set -euo pipefail
         BIN="${{ github.action_path }}/.bin/registry-pr"
@@ -203,6 +213,7 @@ runs:
           -min-conduit-version "${{ inputs.min-conduit-version }}" \
           -min-protocol-version "${{ inputs.min-protocol-version }}" \
           -build-matrix-json "$ARTIFACTS_JSON" \
+          -index-json-url "$INDEX_JSON_URL" \
           -provenance-bundle-url "${{ inputs.provenance-bundle-url }}" \
           -provenance-predicate-type "${{ inputs.provenance-predicate-type }}" \
           -first-registration-ref-pattern "${{ inputs.first-registration-identity-ref-pattern }}" \

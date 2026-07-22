@@ -382,7 +382,7 @@ func parseFlags(args []string) (config, error) {
 	fs.StringVar(&cfg.provenancePredicate, "provenance-predicate-type", "https://slsa.dev/provenance/v1", "SLSA provenance predicateType")
 	fs.StringVar(&cfg.firstRegRefPattern, "first-registration-ref-pattern", "", "human-supplied ref-pattern fragment (new registration only)")
 	fs.StringVar(&cfg.indexRepo, "index-repo", "ConduitIO/conduit-connector-registry", "index repo (owner/repo)")
-	fs.StringVar(&cfg.indexJSONURL, "index-json-url", "", "override for the signed index.json URL (default derived from --index-repo)")
+	fs.StringVar(&cfg.indexJSONURL, "index-json-url", "", "override for the signed index.json URL (default: the served registry URL; set for tests or a private registry)")
 	fs.StringVar(&cfg.trustAnchorsPath, "trust-anchors-json", "", "optional path to a trust-anchors JSON file (see internal/indexfetch)")
 	fs.StringVar(&cfg.runnerEnvironment, "runner-environment", "github-hosted", `"github-hosted" or "self-hosted" (runner.environment)`)
 	fs.BoolVar(&cfg.dryRun, "dry-run", false, "skip nothing in planning; caller skips the PR-open step")
@@ -393,7 +393,12 @@ func parseFlags(args []string) (config, error) {
 	}
 
 	if cfg.indexJSONURL == "" {
-		cfg.indexJSONURL = fmt.Sprintf("https://raw.githubusercontent.com/%s/main/index/dist/index.json", cfg.indexRepo)
+		// The canonical served, signed index (conduit-connector-registry Pages
+		// deploy, custom domain) — the SAME URL conduit's client verifies. The
+		// old raw/dist/ derivation was wrong: dist/ is a Pages build artifact,
+		// never committed to the repo. Overridable via -index-json-url for a
+		// fixture index (tests) or a private registry.
+		cfg.indexJSONURL = "https://registry.conduitdata.io/index.json"
 	}
 	return cfg, nil
 }
