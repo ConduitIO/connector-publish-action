@@ -143,6 +143,10 @@ runs:
         BUILD_MATRIX: ${{ inputs.build-matrix }}
         CONNECTOR_NAME: ${{ inputs.connector-name }}
         VERSION: ${{ inputs.version }}
+        # build-and-sign.sh uploads the signed assets with `gh release upload`,
+        # which needs a token. In a composite action github.token resolves to
+        # the caller workflow's GITHUB_TOKEN (which grants contents: write).
+        GH_TOKEN: ${{ github.token }}
       run: ${{ github.action_path }}/scripts/build-and-sign.sh
 
     # ---------------------------------------------------------------
