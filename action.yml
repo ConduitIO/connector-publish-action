@@ -102,6 +102,14 @@ inputs:
       a pre-tag CI check so publish failures surface before a release is cut.
     required: false
     default: 'false'
+  artifacts-json:
+    description: >-
+      "publish" mode only: the mode=build `artifacts` output, passed in when
+      build and publish run in SEPARATE jobs (the reference 3-job workflow:
+      build -> provenance -> register). When empty, mode=publish falls back to
+      this job's own build-sign step output (only populated for same-job use).
+    required: false
+    default: ''
 
 outputs:
   artifacts:
@@ -166,15 +174,21 @@ runs:
       env:
         GITHUB_WORKFLOW_REF: ${{ github.workflow_ref }}
         RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        # Prefer the cross-job input (reference 3-job workflow passes
+        # needs.build.outputs.artifacts here); fall back to the same-job build
+        # step output. Both via env so the artifacts JSON can never inject into
+        # the shell.
+        ARTIFACTS_INPUT: ${{ inputs.artifacts-json }}
+        SAME_JOB_ARTIFACTS: ${{ steps.build-sign.outputs.artifacts }}
       run: |
         set -euo pipefail
         BIN="${{ github.action_path }}/.bin/registry-pr"
         mkdir -p "$(dirname "$BIN")"
         ( cd "${{ github.action_path }}" && go build -o "$BIN" ./cmd/registry-pr )
 
-        ARTIFACTS_JSON='${{ steps.build-sign.outputs.artifacts }}'
+        ARTIFACTS_JSON="${ARTIFACTS_INPUT:-$SAME_JOB_ARTIFACTS}"
         if [ -z "$ARTIFACTS_JSON" ]; then
-          echo "::error::mode=publish requires steps.build-sign.outputs.artifacts from an earlier mode=build invocation in this workflow (see docs/reference-publish-workflow.yml)" >&2
+          echo "::error::mode=publish needs the build artifacts: pass artifacts-json: \${{ needs.build.outputs.artifacts }} (separate jobs) or run mode=build earlier in the same job (see docs/reference-publish-workflow.yml)" >&2
           exit 1
         fi
 
