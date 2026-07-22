@@ -1,0 +1,122 @@
+# Reference publish workflow for a Conduit connector repo.
+#
+# Copy this into <your-connector-repo>/.github/workflows/publish.yml and
+# adjust build-command/min-*-version/repository. Triggered by a version
+# tag push (the workflow's OWN identity — owner/repo/this-file@this-tag —
+# is exactly what becomes the pinned publisher.expectedIdentityPattern on
+# first registration; see README.md "Why composite, not reusable").
+#
+# THREE jobs, in this order, because of the load-bearing constraint in
+# README.md §"Why composite, not reusable" + §"Why SLSA provenance needs
+# the opposite":
+#
+#   1. build   — conduitio/connector-publish-action in mode=build, running
+#                INSIDE this job (composite action: no `uses: .../workflows/
+#                *.yml@ref` job boundary), so the cosign-signing identity is
+#                THIS repo's own workflow_ref. Needs `id-token: write`
+#                (cosign OIDC) and `contents: write` (uploading release
+#                assets).
+#   2. provenance — slsa-framework/slsa-github-generator's REUSABLE
+#                workflow, `needs: build`, fed the build job's digest
+#                output. This MUST be a separate job calling a reusable
+#                workflow (the opposite shape from step 1) — SLSA L3
+#                requires the provenance-generating process to be isolated
+#                from the build process, so a compromised build job cannot
+#                forge its own provenance. Its identity becomes
+#                `builder.id` in the emitted attestation — a DIFFERENT
+#                identity from the cosign SAN above, checking a different
+#                thing (see README).
+#   3. register — conduitio/connector-publish-action again, mode=publish,
+#                `needs: [build, provenance]`, running INSIDE THIS repo's
+#                job again (composite, same identity as step 1 — the
+#                identity that gets pinned/checked is this job's, not the
+#                provenance job's). Takes the provenance bundle URL from
+#                job 2 and opens/updates the index-repo PR.
+
+name: publish
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+permissions:
+  contents: write   # upload release assets
+  id-token: write    # cosign keyless OIDC + SLSA provenance OIDC
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      artifacts: ${{ steps.publish.outputs.artifacts }}
+      resolved-identity: ${{ steps.publish.outputs.resolved-identity }}
+      hashes: ${{ steps.hash.outputs.hashes }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build + cosign-sign the artifact matrix
+        id: publish
+        uses: ConduitIO/connector-publish-action@v1
+        with:
+          mode: build
+          connector-name: postgres
+          version: ${{ github.ref_name }}
+          # Runs once per (os, arch) cell with GOOS/GOARCH/OUTPUT_PATH set.
+          # Replace with your own build (goreleaser, make, a wrapper script
+          # — anything that honors these three env vars).
+          build-command: |
+            CGO_ENABLED=0 go build -o "$OUTPUT_PATH" ./cmd/connector
+
+      # slsa-github-generator's generic generator needs base64-encoded
+      # sha256 subject digests in ITS OWN input shape — derive that
+      # separately from this Action's artifacts output (a one-line jq,
+      # kept here rather than inside the Action so this repo's workflow
+      # stays the single place that knows the generator's exact input
+      # contract, which the Action does not need to depend on).
+      - name: Format subjects for the SLSA generator
+        id: hash
+        run: |
+          echo "hashes=$(echo '${{ steps.publish.outputs.artifacts }}' | \
+            jq -r '[.[] | "\(.sha256)  \(.url | split("/") | last)"] | join("\n")' | base64 -w0)" >> "$GITHUB_OUTPUT"
+
+  provenance:
+    needs: build
+    permissions:
+      actions: read     # required by the generator to read the build job's workflow run
+      id-token: write   # its own OIDC identity — THIS becomes builder.id
+      contents: write   # uploads the provenance attestation as a release asset
+    # Pin this to a specific, reviewed tag — this ref IS
+    # pkg/registry/trust.ExpectedBuilderID's expected value. Changing it is
+    # a breaking change for every already-registered connector identity;
+    # see connector-publish-action's own drift-guard test
+    # (test/canary/generator_ref_test.go) that fails loudly at PR time if
+    # this ref ever drifts from the conduit-pinned constant.
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
+    with:
+      base64-subjects: ${{ needs.build.outputs.hashes }}
+      upload-assets: true
+
+  register:
+    needs: [build, provenance]
+    permissions:
+      contents: read
+      id-token: write   # this job's OWN cosign identity must resolve the same as `build`'s (composite action, same repo/workflow — only the ref differs if this is a separate workflow file, which it should not be)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Open/update the index-repo PR
+        uses: ConduitIO/connector-publish-action@v1
+        with:
+          mode: publish
+          connector-name: postgres
+          version: ${{ github.ref_name }}
+          min-conduit-version: '0.15.0'
+          min-protocol-version: '0.9.0'
+          repository: https://github.com/ConduitIO/conduit-connector-postgres
+          # Only needed the FIRST time this connector is registered — a
+          # human-authored, tag-scoped fragment. Omit on every subsequent
+          # version bump (routing.Decide ignores it once the name exists).
+          first-registration-identity-ref-pattern: 'refs/tags/v[0-9]+\.[0-9]+\.[0-9]+'
+          provenance-bundle-url: ${{ needs.provenance.outputs.provenance-bundle-url }}
+          index-repo-token: ${{ secrets.REGISTRY_INDEX_PR_TOKEN }}

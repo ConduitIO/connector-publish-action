@@ -1,0 +1,205 @@
+name: 'Conduit connector publish'
+description: >-
+  Build, cosign-keyless-sign, and register a Conduit connector artifact
+  against the conduit-connector-registry index. SHIPPED AS A COMPOSITE
+  ACTION (not a reusable workflow) so this run signs as the CALLING repo's
+  own identity — see README.md "Why composite, not reusable" before
+  changing this file's packaging.
+author: 'ConduitIO'
+
+inputs:
+  mode:
+    description: >-
+      "build" (default): build the matrix, cosign-sign each artifact,
+      upload release assets, emit provenance-subjects for the caller's
+      slsa-github-generator job. "publish": assemble and open/update the
+      index-repo PR, using the provenance bundle URL that later job
+      produced. A connector repo's workflow invokes this action TWICE —
+      see docs/reference-publish-workflow.yml.
+    required: false
+    default: 'build'
+  connector-name:
+    description: 'Registry name, must match ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$.'
+    required: true
+  version:
+    description: 'Semver version being published (typically derived from the triggering tag).'
+    required: true
+  build-command:
+    description: >-
+      Shell command that produces ONE artifact per (os, arch) cell of
+      build-matrix. Invoked once per cell with GOOS/GOARCH/OUTPUT_PATH set
+      in its environment. Required in "build" mode.
+    required: false
+    default: ''
+  build-matrix:
+    description: >-
+      JSON list of {os, arch}. Default covers linux/darwin amd64+arm64;
+      windows/amd64 and windows/arm64 are opt-in (add them explicitly).
+    required: false
+    default: '[{"os":"linux","arch":"amd64"},{"os":"linux","arch":"arm64"},{"os":"darwin","arch":"amd64"},{"os":"darwin","arch":"arm64"}]'
+  min-conduit-version:
+    description: 'Surfaced verbatim into the index entry''s minConduitVersion.'
+    required: true
+  min-protocol-version:
+    description: 'Surfaced verbatim into the index entry''s minProtocolVersion.'
+    required: true
+  display-name:
+    description: 'Human-friendly name for the web UI (new registration only; not trust-bearing).'
+    required: false
+    default: ''
+  description:
+    description: 'Short description for the web UI (new registration only; not trust-bearing).'
+    required: false
+    default: ''
+  repository:
+    description: 'Source repository URL (new registration only; not trust-bearing).'
+    required: false
+    default: ''
+  first-registration-identity-ref-pattern:
+    description: >-
+      HUMAN-SUPPLIED ref-pattern fragment for a first registration, e.g.
+      'refs/tags/v[0-9]+\.[0-9]+\.[0-9]+'. Deliberately NOT auto-derived
+      from the current ref — a maintainer must consciously scope trust to
+      tags. Required only when connector-name is not yet in the index.
+    required: false
+    default: ''
+  index-repo:
+    description: 'owner/repo of the index (index/ + web/ topology, plan-v2 §8).'
+    required: false
+    default: 'ConduitIO/conduit-connector-registry'
+  index-repo-token:
+    description: >-
+      Fine-grained token scoped to open/update PRs on index-repo ONLY —
+      no merge, no admin, no branch-protection write. This is the connector
+      repo's blast radius if compromised: it can propose, never land.
+      Required in "publish" mode unless dry-run is true.
+    required: false
+    default: ''
+  provenance-bundle-url:
+    description: >-
+      SLSA provenance bundle URL, from the caller's separate
+      slsa-github-generator job (see docs/reference-publish-workflow.yml).
+      Required in "publish" mode.
+    required: false
+    default: ''
+  provenance-predicate-type:
+    description: 'in-toto predicateType of the provenance bundle above.'
+    required: false
+    default: 'https://slsa.dev/provenance/v1'
+  trust-anchors-json:
+    description: >-
+      Optional path to a JSON file of {roots, freshness} base64 ed25519
+      public keys, for verifying the index in "publish" mode. Until the
+      root-key bootstrap ceremony (plan-v2 §9) ships real embedded anchors
+      in github.com/conduitio/conduit, this input has no real-world default
+      and the index-verify step fails closed — see README "Known limitations".
+    required: false
+    default: ''
+  dry-run:
+    description: >-
+      "publish" mode only: run identity resolution + routing + PR-content
+      assembly, but skip opening/updating the actual index-repo PR. Use as
+      a pre-tag CI check so publish failures surface before a release is cut.
+    required: false
+    default: 'false'
+
+outputs:
+  artifacts:
+    description: 'JSON list of {os, arch, url, sha256, size} ("build" mode).'
+    value: ${{ steps.build-sign.outputs.artifacts }}
+  resolved-identity:
+    description: 'This run''s Fulcio certificate SAN, as this Action resolves it.'
+    value: ${{ steps.plan.outputs.resolved-identity }}
+  provenance-subjects:
+    description: 'base64 {name,digest} subject list, formatted for slsa-github-generator''s base64-subjects input ("build" mode).'
+    value: ${{ steps.build-sign.outputs.provenance-subjects }}
+  builder-id:
+    description: 'The expected SLSA predicate.builder.id this Action pins (must equal pkg/registry/trust.ExpectedBuilderID).'
+    value: ${{ steps.plan.outputs.builder-id }}
+  pr-kind:
+    description: 'new-name | version-bump | blocked-self-hosted | blocked-identity-mismatch ("publish" mode).'
+    value: ${{ steps.plan.outputs.pr-kind }}
+  pr-url:
+    description: 'Set once the index PR is opened/updated ("publish" mode).'
+    value: ${{ steps.open-pr.outputs.pr-url }}
+
+runs:
+  using: 'composite'
+  steps:
+    # ---------------------------------------------------------------
+    # mode: build — matrix build, digest+size, cosign keyless sign,
+    # upload release assets, emit provenance-subjects.
+    # ---------------------------------------------------------------
+    - name: Install cosign
+      if: ${{ inputs.mode == 'build' }}
+      uses: sigstore/cosign-installer@v3
+
+    - name: Build, digest, and cosign-sign the artifact matrix
+      id: build-sign
+      if: ${{ inputs.mode == 'build' }}
+      shell: bash
+      env:
+        BUILD_COMMAND: ${{ inputs.build-command }}
+        BUILD_MATRIX: ${{ inputs.build-matrix }}
+        CONNECTOR_NAME: ${{ inputs.connector-name }}
+        VERSION: ${{ inputs.version }}
+      run: ${{ github.action_path }}/scripts/build-and-sign.sh
+
+    # ---------------------------------------------------------------
+    # mode: publish — resolve identity, verify the index, route
+    # new-name vs. version-bump vs. refuse, assemble PR content.
+    # ---------------------------------------------------------------
+    - name: Set up Go
+      if: ${{ inputs.mode == 'publish' }}
+      uses: actions/setup-go@v5
+      with:
+        go-version-file: ${{ github.action_path }}/go.mod
+
+    - name: Resolve identity, verify index, decide routing, assemble PR content
+      id: plan
+      if: ${{ inputs.mode == 'publish' }}
+      shell: bash
+      env:
+        GITHUB_WORKFLOW_REF: ${{ github.workflow_ref }}
+        RUNNER_ENVIRONMENT: ${{ runner.environment }}
+      run: |
+        set -euo pipefail
+        BIN="${{ github.action_path }}/.bin/registry-pr"
+        mkdir -p "$(dirname "$BIN")"
+        ( cd "${{ github.action_path }}" && go build -o "$BIN" ./cmd/registry-pr )
+
+        ARTIFACTS_JSON='${{ steps.build-sign.outputs.artifacts }}'
+        if [ -z "$ARTIFACTS_JSON" ]; then
+          echo "::error::mode=publish requires steps.build-sign.outputs.artifacts from an earlier mode=build invocation in this workflow (see docs/reference-publish-workflow.yml)" >&2
+          exit 1
+        fi
+
+        "$BIN" \
+          -workflow-ref "$GITHUB_WORKFLOW_REF" \
+          -runner-environment "$([ "$RUNNER_ENVIRONMENT" = "self-hosted" ] && echo self-hosted || echo github-hosted)" \
+          -connector-name "${{ inputs.connector-name }}" \
+          -version "${{ inputs.version }}" \
+          -display-name "${{ inputs.display-name }}" \
+          -description "${{ inputs.description }}" \
+          -repository "${{ inputs.repository }}" \
+          -min-conduit-version "${{ inputs.min-conduit-version }}" \
+          -min-protocol-version "${{ inputs.min-protocol-version }}" \
+          -build-matrix-json "$ARTIFACTS_JSON" \
+          -provenance-bundle-url "${{ inputs.provenance-bundle-url }}" \
+          -provenance-predicate-type "${{ inputs.provenance-predicate-type }}" \
+          -first-registration-ref-pattern "${{ inputs.first-registration-identity-ref-pattern }}" \
+          -index-repo "${{ inputs.index-repo }}" \
+          -trust-anchors-json "${{ inputs.trust-anchors-json }}" \
+          -dry-run="${{ inputs.dry-run }}" \
+          -output-dir "${{ github.action_path }}/.registry-pr" \
+          -github-output "$GITHUB_OUTPUT"
+
+    - name: Open or update the index-repo PR
+      id: open-pr
+      if: ${{ inputs.mode == 'publish' && inputs.dry-run != 'true' }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.index-repo-token }}
+        INDEX_REPO: ${{ inputs.index-repo }}
+        OUTPUT_DIR: ${{ github.action_path }}/.registry-pr
+      run: ${{ github.action_path }}/scripts/open-index-pr.sh

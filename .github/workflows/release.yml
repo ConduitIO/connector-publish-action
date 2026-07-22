@@ -1,0 +1,52 @@
+name: release
+
+# Builds static `registry-pr` binaries and attaches them to the GitHub
+# Release for the pushed tag, so CONSUMING connector repos never need to
+# build this repo's Go module themselves — only this repo's own release
+# pipeline does. action.yml's mode=publish step downloads the binary
+# matching the runner's OS/arch from this release instead of building from
+# source at call time (that download-wiring is still a follow-up — see
+# README.md "Known limitations").
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-binaries:
+    strategy:
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+          - os: linux
+            arch: arm64
+          - os: darwin
+            arch: amd64
+          - os: darwin
+            arch: arm64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build registry-pr for ${{ matrix.os }}/${{ matrix.arch }}
+        env:
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: '0'
+        run: |
+          mkdir -p dist
+          go build -trimpath -o "dist/registry-pr-${{ matrix.os }}-${{ matrix.arch }}" ./cmd/registry-pr
+
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.ref_name }}" "dist/registry-pr-${{ matrix.os }}-${{ matrix.arch }}" --clobber
