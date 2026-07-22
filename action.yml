@@ -198,7 +198,7 @@ runs:
 
         ARTIFACTS_JSON="${ARTIFACTS_INPUT:-$SAME_JOB_ARTIFACTS}"
         if [ -z "$ARTIFACTS_JSON" ]; then
-          echo "::error::mode=publish needs the build artifacts: pass artifacts-json: \${{ needs.build.outputs.artifacts }} (separate jobs) or run mode=build earlier in the same job (see docs/reference-publish-workflow.yml)" >&2
+          echo "::error::mode=publish needs the build artifacts: set the artifacts-json input to the build job's artifacts output (separate jobs), or run mode=build earlier in the same job (see docs/reference-publish-workflow.yml)" >&2
           exit 1
         fi
 
