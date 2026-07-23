@@ -59,14 +59,23 @@ fi
 for i in $(seq 0 $((CELL_COUNT - 1))); do
   OS="$(echo "$BUILD_MATRIX" | jq -r ".[$i].os")"
   ARCH="$(echo "$BUILD_MATRIX" | jq -r ".[$i].arch")"
-  OUT="$WORKDIR/${CONNECTOR_NAME}_${VERSION}_${OS}_${ARCH}"
+  BIN="$WORKDIR/${CONNECTOR_NAME}"
+  OUT="$WORKDIR/${CONNECTOR_NAME}_${VERSION}_${OS}_${ARCH}.tar.gz"
 
   echo "::group::build ${OS}/${ARCH}"
-  GOOS="$OS" GOARCH="$ARCH" OUTPUT_PATH="$OUT" bash -c "$BUILD_COMMAND"
-  if [ ! -f "$OUT" ]; then
-    echo "::error::build-command did not produce a file at \$OUTPUT_PATH ($OUT) for ${OS}/${ARCH}" >&2
+  GOOS="$OS" GOARCH="$ARCH" OUTPUT_PATH="$BIN" bash -c "$BUILD_COMMAND"
+  if [ ! -f "$BIN" ]; then
+    echo "::error::build-command did not produce a file at \$OUTPUT_PATH ($BIN) for ${OS}/${ARCH}" >&2
     exit 1
   fi
+  chmod +x "$BIN"
+  # Package as a tar.gz containing the connector binary at the archive root —
+  # conduit's installer (pkg/registry/extract.go ExtractBinary) extracts a
+  # single root-level executable from a tar.gz (the goreleaser convention). The
+  # signature + digest below are over this ARCHIVE, which is what the client
+  # downloads and verifies before extracting.
+  tar -czf "$OUT" -C "$WORKDIR" "$(basename "$BIN")"
+  rm -f "$BIN"
   echo "::endgroup::"
 
   # Digest + size computed from the artifact exactly as written above —
