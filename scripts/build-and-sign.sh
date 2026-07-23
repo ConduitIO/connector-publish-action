@@ -76,8 +76,14 @@ for i in $(seq 0 $((CELL_COUNT - 1))); do
 
   BUNDLE="${OUT}.sigstore.json"
   echo "::group::cosign sign-blob ${OS}/${ARCH}"
+  # --new-bundle-format emits the sigstore protobuf bundle
+  # (application/vnd.dev.sigstore.bundle+json) that conduit's trust core
+  # (sigstore-go bundle.UnmarshalJSON) loads. Without it, cosign writes the
+  # LEGACY {base64Signature,cert,rekorBundle} shape, which conduit rejects as
+  # "no valid signature bundle" — a wrong-format signature, not an install.
   cosign sign-blob --yes \
     --oidc-issuer https://token.actions.githubusercontent.com \
+    --new-bundle-format \
     --bundle "$BUNDLE" \
     "$OUT"
   echo "::endgroup::"
